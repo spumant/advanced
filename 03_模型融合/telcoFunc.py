@@ -7,7 +7,7 @@ from sklearn.pipeline import make_pipeline
 
 from sklearn.linear_model import LogisticRegression
 from sklearn.model_selection import GridSearchCV
-from sklearn.base import BaseEstimator, TransformerMixin
+from sklearn.base import BaseEstimator, TransformerMixin, ClassifierMixin
 
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
@@ -17,6 +17,7 @@ from sklearn.metrics import (
     f1_score,
     roc_auc_score,
 )
+from sklearn.ensemble import VotingClassifier
 
 
 def missing(df):
@@ -73,14 +74,14 @@ def result_df(model, X_train, y_train, X_test, y_test, metrics=None):
     res_test = []
     col_name = []
     for fun in metrics:
-        res_train.append(fun(model.predict(X_train), y_train))
-        res_test.append(fun(model.predict(X_test), y_test))
+        res_train.append(y_train, fun(model.predict(X_train)))
+        res_test.append(y_test, fun(model.predict(X_test)))
         col_name.append(fun.__name__)
     idx_name = ['train_eval', 'test_eval']
     return pd.DataFrame([res_train, res_test], columns=col_name, index=idx_name)
 
 
-class logit_threshold(BaseEstimator, TransformerMixin):
+class logit_threshold(BaseEstimator, ClassifierMixin, TransformerMixin):
     def __init__(
         self,
         penalty='l2',
@@ -107,10 +108,16 @@ class logit_threshold(BaseEstimator, TransformerMixin):
             l1_ratio=self.l1_ratio,
             class_weight=self.class_weight,
             max_iter=self.max_iter,
+            random_state=12,
         )
         clf.fit(X, y)
+        self.coef_ = clf.coef_
         self.clf = clf
+        self.classes_ = pd.Series(y).unique()
         return self
+
+    def predict_proba(self, X):
+        return self.clf.predict_proba(X)
 
     def predict(self, X):
         return (self.clf.predict_proba(X)[:, 1] >= self.thr) * 1
@@ -137,23 +144,32 @@ def Cross_Combination(colSet, df):
     return newDF, col_name_l
 
 
-def cate_colName(Transformer, category_cols, drop='if_binary'):
-    """
-    离散字段独热编码后字段名创建函数
+class VotingClassifier_threshold(BaseEstimator, ClassifierMixin, TransformerMixin):
+    def __init__(self, estimators, voting='hard', weights=None, thr=0.5):
+        self.estimators = estimators
+        self.voting = voting
+        self.weights = weights
+        self.thr = thr
 
-    :param Transformer: 独热编码转化器
-    :param category_cols: 输入转化器的离散变量
-    :param drop: 独热编码转化器的drop参数
-    """
+    def fit(self, X, y):
+        VC = VotingClassifier(
+            estimators=self.estimators, voting=self.voting, weights=self.weights
+        )
 
-    cate_cols_new = []
-    col_value = Transformer.categories_
+        VC.fit(X, y)
+        self.clf = VC
 
-    for i, j in enumerate(category_cols):
-        if (drop == 'if_binary') & (len(col_value[i]) == 2):
-            cate_cols_new.append(j)
-        else:
-            for f in col_value[i]:
-                feature_name = f'{str(j)}_{str(f)}'
-                cate_cols_new.append(feature_name)
-    return cate_cols_new
+        return self
+
+    def predict_proba(self, X):
+        return self.clf.predict_proba(X) if self.voting == 'soft' else None
+
+    def predict(self, X):
+        return (
+            (self.clf.predict_proba(X)[:, 1] >= self.thr) * 1
+            if self.voting == 'soft'
+            else self.clf.predict(X)
+        )
+
+    def score(self, X, y):
+        return accuracy_score(self.predict(X), y)
